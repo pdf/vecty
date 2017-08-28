@@ -273,10 +273,10 @@ func (h *HTML) reconcileChildren(prev *HTML, insertBefore *HTML) {
 			continue
 		}
 
-		prevChild := prev.children[i]
 		// If the previous child was nil, try to find the next DOM node in the
 		// previous render so that we can insert this child at the correct
 		// location
+		prevChild := prev.children[i]
 		if prevChild == nil {
 			for j := i + 1; j < len(prev.children) && insertBefore == nil; j++ {
 				if prevChildList, ok := prev.children[j].(List); ok {
@@ -287,23 +287,29 @@ func (h *HTML) reconcileChildren(prev *HTML, insertBefore *HTML) {
 			}
 		}
 
+		// If the next child is a list, reconcile its elements in-place.
+		// Otherwise determine the prevChildRender so that we can reconcile as
+		// usual.
 		var prevChildRender *HTML
 		switch {
 		case isList(nextChild):
-			// reconcile list elements in-place
+			// next child is a list; reconcile list elements in-place and we're
+			// done.
 			nextChild.(List).reconcile(h.node, insertBefore, prevChild)
 			continue
 		case isList(prevChild):
-			// remove additional list elements from the previous render, since
-			// we no longer have a list
+			// next child is not a list, previous child is a list; remove
+			// additional list elements from the previous render, since we no
+			// longer have a list.
 			var idx int
-			l := prevChild.(List)
-			idx, prevChildRender = l.firstHTML()
-			l.removeExcept(h.node, idx)
+			idx, prevChildRender = prevChild.(List).firstHTML()
+			prevChild.(List).removeExcept(h.node, idx)
 		default:
+			// next child and previous child are not lists.
 			prevChildRender = extractHTML(prevChild)
 		}
 
+		// Determine the next child render.
 		nextChildRender, skip := render(nextChild, prevChild)
 		if nextChildRender != nil && prevChildRender != nil && nextChildRender == prevChildRender {
 			panic("vecty: next child render must not equal previous child render (did the child Render illegally return a stored render variable?)")
@@ -322,17 +328,23 @@ func (h *HTML) reconcileChildren(prev *HTML, insertBefore *HTML) {
 			continue
 		}
 
+		// Perform the final reconciliation action for nextChildRender and
+		// prevChildRender. Replace, remove, insert or append the DOM nodes.
 		switch {
 		case nextChildRender == nil && prevChildRender == nil:
-			continue
+			continue // nothing to do.
+		case nextChildRender != nil && prevChildRender != nil:
+			replaceNode(nextChildRender.node, prevChildRender.node)
 		case nextChildRender == nil && prevChildRender != nil:
 			removeNode(prevChildRender.node)
-		case nextChildRender != nil && prevChildRender == nil && insertBefore == nil:
+		case nextChildRender != nil && prevChildRender == nil:
+			if insertBefore {
+				h.node.Call("insertBefore", nextChildRender.node, insertBefore.node)
+				continue
+			}
 			h.node.Call("appendChild", nextChildRender.node)
-		case nextChildRender != nil && prevChildRender == nil && insertBefore != nil:
-			h.node.Call("insertBefore", nextChildRender.node, insertBefore.node)
 		default:
-			replaceNode(nextChildRender.node, prevChildRender.node)
+			panic("vecty: internal error (unexpected switch state)")
 		}
 	}
 	h.removeChildren(prev)
@@ -344,9 +356,10 @@ func (h *HTML) removeChildren(prev *HTML) {
 	if prev == nil {
 		return
 	}
-	for i := len(h.children); i < len(prev.children); i++ {
-		prevChild := prev.children[i]
+	// Every previous child that h.children does not have in common.
+	for _, prevChild := range prev.children[len(h.children):] {
 		if prevChildList, ok := prevChild.(List); ok {
+			// Previous child was a list, so remove all DOM nodes in it.
 			prevChildList.removeExcept(h.node, -1)
 			continue
 		}
@@ -361,13 +374,12 @@ func (h *HTML) removeChildren(prev *HTML) {
 	}
 }
 
-// List represents a list of Markup, Component, or HTML which is
-// individually applied to an HTML element or text node.
+// List represents a list of components or HTML.
 type List []ComponentOrHTML
 
-// reconcile the List against the DOM node in isolation.  If insertBefore
-// is non-nil, the List elements will be inserted into the DOM before that
-// node.
+// reconcile reconciles the List against the DOM node in isolation. If
+// insertBefore is non-nil, the List elements will be inserted into the DOM
+// before that node.
 func (l List) reconcile(node jsObject, insertBefore *HTML, prev ComponentOrHTML) {
 	nextHTML := &HTML{node: node, children: l}
 	switch c := prev.(type) {
@@ -376,14 +388,14 @@ func (l List) reconcile(node jsObject, insertBefore *HTML, prev ComponentOrHTML)
 	default:
 		if prev == nil {
 			nextHTML.reconcileChildren(&HTML{node: node}, insertBefore)
-		} else {
-			nextHTML.reconcileChildren(&HTML{node: node, children: []ComponentOrHTML{prev}}, insertBefore)
+			return
 		}
+		nextHTML.reconcileChildren(&HTML{node: node, children: []ComponentOrHTML{prev}}, insertBefore)
 	}
 }
 
 // firstHTML returns the index and content of the first element from which a
-// *HTML can be extracted.  Returns an index of -1 if not found.
+// *HTML can be extracted. Returns (-1, nil) if not found.
 func (l List) firstHTML() (idx int, h *HTML) {
 	for idx = 0; idx < len(l); idx++ {
 		if listChild, ok := l[idx].(List); ok {
@@ -398,14 +410,14 @@ func (l List) firstHTML() (idx int, h *HTML) {
 	return -1, nil
 }
 
-// removeExcept removes the List's elements from the DOM node, except for
-// the element at index exceptIndex.  If exceptIndex is less than zero, all
-// elements are removed.
+// removeExcept removes the List's elements from the DOM node, except for the
+// element at index exceptIndex. If exceptIndex is less than zero, all elements
+// are removed.
 func (l List) removeExcept(node jsObject, exceptIndex int) {
 	var children List
 	switch {
 	case exceptIndex < 0:
-		children = l
+		children = l // removing everything in the list
 	case isList(l[exceptIndex]):
 		// TODO(pdf): I'm not sure I like the assumption here that we want to
 		// retain the first element of sub-lists, but not sure if there's a

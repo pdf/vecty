@@ -51,7 +51,7 @@ type Event struct {
 //  *HTML
 //  List
 //  nil
-//  markupList
+//  MarkupList
 //
 // If the underlying value is not one of these types, the code handling the
 // value is expected to panic.
@@ -59,10 +59,7 @@ type MarkupOrChild interface{}
 
 func apply(m MarkupOrChild, h *HTML) {
 	switch m := m.(type) {
-	case markupList:
-		if m == nil {
-			return
-		}
+	case MarkupList:
 		m.Apply(h)
 	case Component, *HTML, List, nil:
 		h.children = append(h.children, m)
@@ -151,13 +148,17 @@ func (m ClassMap) Apply(h *HTML) {
 	Property("className", strings.Join(classes, " ")).Apply(h)
 }
 
-// markupList represents a list of Applyer which is individually
+// MarkupList represents a list of Applyer which is individually
 // applied to an HTML element or text node.
-type markupList []Applyer
+//
+// It may only be created through the Markup function.
+type MarkupList struct {
+	list []Applyer
+}
 
 // Apply implements the Applyer interface.
-func (m markupList) Apply(h *HTML) {
-	for _, a := range m {
+func (m MarkupList) Apply(h *HTML) {
+	for _, a := range m.list {
 		if a == nil {
 			continue
 		}
@@ -167,8 +168,12 @@ func (m markupList) Apply(h *HTML) {
 
 // Markup wraps a list of Applyer which is individually
 // applied to an HTML element or text node.
-func Markup(m ...Applyer) markupList { // nolint: golint
-	return markupList(m)
+func Markup(m ...Applyer) MarkupList {
+	// returns public non-pointer struct value with private field so that users
+	// must acquire a MarkupList only from this function, and so that it can
+	// never be nil (which would make it indistinguishable from (*HTML)(nil) in
+	// a call to e.g. Tag).
+	return MarkupList{list: m}
 }
 
 // If returns nil if cond is false, otherwise it returns the given markup.

@@ -69,6 +69,19 @@ type Unmounter interface {
 	Unmount()
 }
 
+// Keyer is an optional interface that a Component can implement in order to
+// uniquely identify the component amongst its siblings. If implemented, all
+// sibling, both components and HTML, must also be keyed.
+//
+// Implementing this interface allows siblings to be removed or re-ordered
+// whilst retaining state, and improving render efficiency.
+type Keyer interface {
+	// Key returns a value that uniquely identifies the component amongst its
+	// siblings. The returned type must be a valid map key, or rendering will
+	// panic.
+	Key() interface{}
+}
+
 // ComponentOrHTML represents one of:
 //
 //  Component
@@ -109,10 +122,26 @@ type HTML struct {
 	properties, attributes          map[string]interface{}
 	eventListeners                  []*EventListener
 	children                        []ComponentOrHTML
+	key                             interface{}
+	// keyedChildren stores a map of keys to children, for keyed reconciliation.
+	keyedChildren map[interface{}]ComponentOrHTML
+	// hasKeyedChildren stores whether this element has keyed children.
+	hasKeyedChildren bool
+	// insertBeforeNode tracks the DOM node that elements should be inserted
+	// before, across List boundaries.
+	insertBeforeNode jsObject
+	// lastRendered child tracks the last child that was rendered, across List
+	// boundaries.
+	lastRenderedChild *HTML
 }
 
 // Node returns the underlying JavaScript Element or TextNode.
 func (h *HTML) Node() *js.Object { return h.node.(wrappedObject).j }
+
+// Key implements the Keyer interface.
+func (h *HTML) Key() interface{} {
+	return h.key
+}
 
 func (h *HTML) createNode() {
 	switch {
@@ -252,29 +281,63 @@ func (h *HTML) reconcile(prev *HTML) []Mounter {
 		h.node.Set("innerHTML", h.innerHTML)
 	}
 
-	return h.reconcileChildren(prev, nil)
+	return h.reconcileChildren(prev)
 }
 
 // reconcileChildren reconciles children of the current HTML against a previous
 // render's DOM nodes.
-func (h *HTML) reconcileChildren(prev *HTML, insertBefore *HTML) (pendingMounts []Mounter) {
-	// TODO better list element reuse
+func (h *HTML) reconcileChildren(prev *HTML) (pendingMounts []Mounter) {
 	for i, nextChild := range h.children {
-		// TODO(pdf): Add tests for node equality
-		new := h.node != prev.node
-
 		// Massage concrete type if necessary.
 		switch v := nextChild.(type) {
 		case *HTML:
+			// If the type of the child is *HTML, but its value is nil, replace
+			// the child with a concrete nil, to ensure consistent render
+			// handling.
 			if v == nil {
 				nextChild = nil
 				h.children[i] = nextChild
 			}
+		case List:
+			// Replace List with keyedList, which can handle nested keys and
+			// children.
+			nextChild = keyedList{html: &HTML{children: v}}
+			h.children[i] = nextChild
 		}
 
-		if i >= len(prev.children) || new {
-			if nextChildList, ok := nextChild.(List); ok {
-				nextChildList.reconcile(h.node, insertBefore, nil)
+		// TODO(pdf): Add tests for node equality, keyed children
+		var (
+			new     = h.node != prev.node
+			nextKey interface{}
+		)
+		keyer, isKeyer := nextChild.(Keyer)
+		if h.hasKeyedChildren && !isKeyer {
+			panic("vecty: all siblings must have keys when using keyed elements")
+		}
+		if isKeyer {
+			nextKey = keyer.Key()
+			if h.hasKeyedChildren && nextKey == nil {
+				panic("vecty: all siblings must have keys when using keyed elements")
+			}
+			if nextKey != nil {
+				if h.keyedChildren == nil {
+					h.keyedChildren = make(map[interface{}]ComponentOrHTML)
+				}
+				if _, exists := h.keyedChildren[nextKey]; exists {
+					panic("vecty: duplicate sibling key")
+				}
+				// Store the keyed child.
+				h.keyedChildren[nextKey] = nextChild
+			}
+		}
+		h.hasKeyedChildren = len(h.keyedChildren) > 0
+
+		// If this is a new element (changed type, or did not exist previously),
+		// simply add the element directly. The existence of keyed children
+		// can not be determined by children index, so skip if keyed.
+		if (i >= len(prev.children) && !h.hasKeyedChildren) || new {
+			if nextChildList, ok := nextChild.(keyedList); ok {
+				nextChildList.reconcile(h, nil)
 				continue
 			}
 			nextChildRender, skip, mounters := render(nextChild, nil)
@@ -285,52 +348,104 @@ func (h *HTML) reconcileChildren(prev *HTML, insertBefore *HTML) (pendingMounts 
 			if m, ok := nextChild.(Mounter); ok {
 				pendingMounts = append(pendingMounts, m)
 			}
-			if insertBefore != nil {
-				h.node.Call("insertBefore", nextChildRender.node, insertBefore.node)
-				continue
-			}
-			h.node.Call("appendChild", nextChildRender.node)
+			h.lastRenderedChild = nextChildRender
+			h.insertBefore(h.insertBeforeNode, nextChildRender)
 			continue
 		}
 
-		prevChild := prev.children[i]
+		var prevChild ComponentOrHTML
+		if len(prev.children) > i {
+			prevChild = prev.children[i]
+		}
+		// Find previous keyed sibling if exists, and mutate from there.
+		var stableKey bool
+		if h.hasKeyedChildren {
+			if prevKeyedChild, ok := prev.keyedChildren[nextKey]; ok {
+				// If the previous node rendered at this position matches the
+				// keyed previous render node, we have a stable key, and will
+				// replace later instead of inserting.
+				var prevPositionRender, prevKeyedRender *HTML
+				if _, isList := prevChild.(keyedList); !isList {
+					prevPositionRender = extractHTML(prevChild)
+				}
+				if _, isList := prevKeyedChild.(keyedList); !isList {
+					prevKeyedRender = extractHTML(prevKeyedChild)
+				}
+				if prevPositionRender != nil && prevKeyedRender != nil && prevPositionRender.node == prevKeyedRender.node {
+					stableKey = true
+				}
+
+				prevChild = prevKeyedChild
+				// Delete the matched key from the previous index map so that
+				// we can remove any dangling children.
+				delete(prev.keyedChildren, nextKey)
+			} else {
+				prevChild = nil
+			}
+		}
+
 		var prevChildRender *HTML
 		// If the previous child was not a list, extract the previous child
 		// render.
-		if _, isList := prevChild.(List); !isList {
+		if _, isList := prevChild.(keyedList); !isList {
 			prevChildRender = extractHTML(prevChild)
 		}
 
-		// If the previous child render was nil, try to find the next DOM node
+		// If the previous child render was nil try to find the next DOM node
 		// in the previous render so that we can insert this child at the
 		// correct location.
-		if prevChildRender == nil {
-			for j := i + 1; j < len(prev.children) && insertBefore == nil; j++ {
-				if prevChildList, ok := prev.children[j].(List); ok {
-					insertBefore = prevChildList.firstHTML()
-				} else {
-					insertBefore = extractHTML(prev.children[j])
-				}
+		if prevChildRender == nil && h.insertBeforeNode == nil {
+			// If we have not rendered any children yet, take the insert
+			// position from the first child, if any, otherwise use the
+			// next sibling from the last rendered child.
+			if h.lastRenderedChild == nil {
+				h.insertBeforeNode = h.firstChild()
+			} else {
+				h.insertBeforeNode = h.lastRenderedChild.nextSibling()
 			}
+		}
+		// If our insertion node is the current previous child, advance to the
+		// next sibling.
+		if prevChildRender != nil && prevChildRender.node == h.insertBeforeNode {
+			h.insertBeforeNode = h.insertBeforeNode.Get("nextSibling")
 		}
 
 		// If the next child is a list, reconcile its elements in-place, and
 		// we're done.
-		if nextChildList, ok := nextChild.(List); ok {
-			nextChildList.reconcile(h.node, insertBefore, prevChild)
+		if nextChildList, ok := nextChild.(keyedList); ok {
+			nextChildList.reconcile(h, prevChild)
 			continue
 		}
 
 		// If the previous child was a list, remove the list elements from the
 		// previous render, since we no longer have a list.
-		if prevChildList, ok := prevChild.(List); ok {
-			prevChildList.remove(h.node)
+		if prevChildList, ok := prevChild.(keyedList); ok {
+			prevChildList.remove(h)
+			prevChild = nil
+		}
+
+		// If we're keyed and not stable, find the next DOM node from the
+		// previous render to insert before, for reordering.
+		var insertBeforeKeyedNode jsObject
+		if h.hasKeyedChildren && !stableKey {
+			insertBeforeKeyedNode = h.lastRenderedChild.nextSibling()
+			// If the next node is our old node, mark key as stable.
+			if prevChildRender != nil && prevChildRender.node == insertBeforeKeyedNode {
+				stableKey = true
+				insertBeforeKeyedNode = nil
+			}
 		}
 
 		// Determine the next child render.
 		nextChildRender, skip, mounters := render(nextChild, prevChild)
 		if nextChildRender != nil && prevChildRender != nil && nextChildRender == prevChildRender {
 			panic("vecty: next child render must not equal previous child render (did the child Render illegally return a stored render variable?)")
+		}
+
+		// Store the last rendered child to determine insertion target for
+		// subsequent children.
+		if nextChildRender != nil {
+			h.lastRenderedChild = nextChildRender
 		}
 
 		// If the previous and next child are components of the same type, then
@@ -341,6 +456,9 @@ func (h *HTML) reconcileChildren(prev *HTML, insertBefore *HTML) (pendingMounts 
 			if nextChildComponent, ok := nextChild.(Component); ok && sameType(prevChildComponent, nextChildComponent) {
 				h.children[i] = prevChild
 				nextChild = prevChild
+				if h.hasKeyedChildren {
+					h.keyedChildren[nextKey] = prevChild
+				}
 			}
 		}
 		if skip {
@@ -357,89 +475,189 @@ func (h *HTML) reconcileChildren(prev *HTML, insertBefore *HTML) (pendingMounts 
 			if m := mountUnmount(nextChild, prevChild); m != nil {
 				pendingMounts = append(pendingMounts, m)
 			}
+			if h.hasKeyedChildren && !stableKey {
+				// Moving keyed children need to be inserted (which moves existing
+				// nodes), rather than replacing the previous child at this
+				// position.
+				if insertBeforeKeyedNode != nil {
+					// Insert before the next sibling, if we have one.
+					h.insertBefore(insertBeforeKeyedNode, nextChildRender)
+					continue
+				}
+				h.insertBefore(h.insertBeforeNode, nextChildRender)
+				continue
+			}
 			replaceNode(nextChildRender.node, prevChildRender.node)
 		case nextChildRender == nil && prevChildRender != nil:
-			unmount(prevChild)
-			removeNode(prevChildRender.node)
+			h.removeChild(prevChildRender)
 		case nextChildRender != nil && prevChildRender == nil:
 			if m, ok := nextChild.(Mounter); ok {
 				pendingMounts = append(pendingMounts, m)
 			}
-			if insertBefore != nil {
-				h.node.Call("insertBefore", nextChildRender.node, insertBefore.node)
+			if insertBeforeKeyedNode != nil {
+				// Insert before the next keyed sibling, if we have one.
+				h.insertBefore(insertBeforeKeyedNode, nextChildRender)
 				continue
 			}
-			h.node.Call("appendChild", nextChildRender.node)
+			h.insertBefore(h.insertBeforeNode, nextChildRender)
 		default:
 			panic("vecty: internal error (unexpected switch state)")
 		}
 	}
-	h.removeChildren(prev)
+
+	// If dealing with keyed siblings, remove children by key rather than
+	// position.
+	if prev.hasKeyedChildren && h.hasKeyedChildren {
+		prevChildren := make([]ComponentOrHTML, len(prev.keyedChildren))
+		i := 0
+		for _, c := range prev.keyedChildren {
+			prevChildren[i] = c
+			i++
+		}
+		h.removeChildren(prevChildren)
+		return pendingMounts
+	}
+
+	if len(prev.children) > len(h.children) {
+		// Remove every previous child that h.children does not have in common.
+		h.removeChildren(prev.children[len(h.children):])
+	}
 	return pendingMounts
 }
 
 // removeChildren removes child elements from the previous render pass that no
 // longer exist on the current HTML children.
-func (h *HTML) removeChildren(prev *HTML) {
-	if prev == nil {
-		return
-	}
-	// Every previous child that h.children does not have in common.
-	for i := len(h.children); i < len(prev.children); i++ {
-		prevChild := prev.children[i]
-		if prevChildList, ok := prevChild.(List); ok {
+func (h *HTML) removeChildren(prevChildren []ComponentOrHTML) {
+	for _, prevChild := range prevChildren {
+		if prevChildList, ok := prevChild.(keyedList); ok {
 			// Previous child was a list, so remove all DOM nodes in it.
-			prevChildList.remove(h.node)
+			prevChildList.remove(h)
 			continue
 		}
 		prevChildRender := extractHTML(prevChild)
 		if prevChildRender == nil {
 			continue
 		}
-		unmount(prevChild)
-		removeNode(prevChildRender.node)
+		h.removeChild(prevChildRender)
 	}
+}
+
+// firstChild returns the first child DOM node of this element.
+func (h *HTML) firstChild() jsObject {
+	if h == nil || h.node == nil {
+		return nil
+	}
+	return h.node.Get("firstChild")
+}
+
+// nextSibling returns the next sibling DOM node for this element.
+func (h *HTML) nextSibling() jsObject {
+	if h == nil || h.node == nil {
+		return nil
+	}
+	return h.node.Get("nextSibling")
+}
+
+// removeChild removes the provided child element from this element, and
+// triggers unmount handlers.
+func (h *HTML) removeChild(child *HTML) {
+	// If we're removing the current insert target, use the next
+	// sibling, if any.
+	if h.insertBeforeNode != nil && h.insertBeforeNode == child.node {
+		h.insertBeforeNode = h.insertBeforeNode.Get("nextSibling")
+	}
+	unmount(child)
+	if child.node == nil {
+		return
+	}
+	// Use the child's parent node here, in case our node is not a valid
+	// target by the time we're called.
+	child.node.Get("parentNode").Call("removeChild", child.node)
+}
+
+// appendChild appends a new child to this element.
+func (h *HTML) appendChild(child *HTML) {
+	h.node.Call("appendChild", child.node)
+}
+
+// insertBefore inserts the provided child before the provided DOM node. If the
+// DOM node is nil, the child will be appended instead.
+func (h *HTML) insertBefore(node jsObject, child *HTML) {
+	if node == nil {
+		h.appendChild(child)
+		return
+	}
+	h.node.Call("insertBefore", child.node, node)
 }
 
 // List represents a list of components or HTML.
 type List []ComponentOrHTML
 
-// reconcile reconciles the List against the DOM node in isolation. If
-// insertBefore is non-nil, the List elements will be inserted into the DOM
-// before that node.
-func (l List) reconcile(node jsObject, insertBefore *HTML, prev ComponentOrHTML) []Mounter {
-	nextHTML := &HTML{node: node, children: l}
-	switch c := prev.(type) {
-	case List:
-		return nextHTML.reconcileChildren(&HTML{node: node, children: c}, insertBefore)
+// WithKey wraps the List in a Keyer using the given key.
+func (l List) WithKey(key interface{}) MarkupOrChild {
+	return keyedList{key: key, html: &HTML{children: l}}
+}
+
+// keyedList is used to render a set of children into another element in a
+// separate context, without requiring a structural element. Keyed children
+// also occupy a separate keyspace to the parent element. Setting the key
+// is optional, and only required when the keyedList has keyed siblings.
+type keyedList struct {
+	html *HTML
+	key  interface{}
+}
+
+// Key implements the Keyer interface
+func (l keyedList) Key() interface{} {
+	return l.key
+}
+
+// reconcile reconciles the keyedList against the DOM node in a separate
+// context, unless keyed. Uses the currently known insertion point from the
+// parent to insert children at the correct position.
+func (l keyedList) reconcile(parent *HTML, prevChild ComponentOrHTML) (pendingMounts []Mounter) {
+	// Copy parent scope to render list elements into
+	l.html.node = parent.node
+	l.html.insertBeforeNode = parent.insertBeforeNode
+	l.html.lastRenderedChild = parent.lastRenderedChild
+	switch v := prevChild.(type) {
+	case keyedList:
+		pendingMounts = l.html.reconcileChildren(v.html)
 	default:
-		if prev == nil {
-			return nextHTML.reconcileChildren(&HTML{node: node}, insertBefore)
-		}
-		return nextHTML.reconcileChildren(&HTML{node: node, children: []ComponentOrHTML{prev}}, insertBefore)
-	}
-}
-
-// firstHTML returns the content of the first element from which a *HTML can be
-// extracted. Returns nil if not found.
-func (l List) firstHTML() (h *HTML) {
-	for _, v := range l {
-		if listChild, ok := v.(List); ok {
-			h = listChild.firstHTML()
+		if prevChild == nil {
+			pendingMounts = l.html.reconcileChildren(&HTML{node: parent.node})
 		} else {
-			h = extractHTML(v)
-		}
-		if h != nil {
-			return h
+			// Build a previous render containing just the prevChild to be
+			// replaced by this list
+			prev := &HTML{node: parent.node, children: []ComponentOrHTML{prevChild}}
+			if keyer, ok := prevChild.(Keyer); ok && keyer.Key() != nil {
+				prev.keyedChildren = map[interface{}]ComponentOrHTML{keyer.Key(): prevChild}
+				prev.hasKeyedChildren = true
+			}
+			pendingMounts = l.html.reconcileChildren(prev)
 		}
 	}
-	return nil
+	// Update parent insertBeforeNode in case any children were removed.
+	if parent.insertBeforeNode != nil {
+		parent.insertBeforeNode = l.html.insertBeforeNode
+	}
+	// Update parent lastRenderedChild from list result.
+	if l.html.lastRenderedChild != nil {
+		parent.lastRenderedChild = l.html.lastRenderedChild
+	}
+	return pendingMounts
 }
 
-// remove the List's elements from the DOM node
-func (l List) remove(node jsObject) {
-	nextHTML := &HTML{node: node}
-	nextHTML.removeChildren(&HTML{node: node, children: l})
+// remove keyedList elements from the parent.
+func (l keyedList) remove(parent *HTML) {
+	// Copy parent scope to remove list elements from
+	l.html.node = parent.node
+	l.html.insertBeforeNode = parent.insertBeforeNode
+	l.html.removeChildren(l.html.children)
+	// Update parent insertBeforeNode in case any children were removed.
+	if parent.insertBeforeNode != nil {
+		parent.insertBeforeNode = l.html.insertBeforeNode
+	}
 }
 
 // Tag returns an HTML element with the given tag name. Generally, this
@@ -676,8 +894,8 @@ func unmount(e ComponentOrHTML) {
 		c.Context().unmounted = true
 	}
 
-	if list, ok := e.(List); ok {
-		for _, child := range list {
+	if l, ok := e.(keyedList); ok {
+		for _, child := range l.html.children {
 			unmount(child)
 		}
 		return

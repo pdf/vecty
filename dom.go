@@ -304,6 +304,9 @@ func (h *HTML) reconcileChildren(prev *HTML) (pendingMounts []Mounter) {
 			h.children[i] = nextChild
 		}
 
+		// Ensure children implement the keyer interface consistently, and
+		// populate the keyedChildren map now.
+		//
 		// TODO(pdf): Add tests for node equality, keyed children
 		var (
 			new     = h.node != prev.node

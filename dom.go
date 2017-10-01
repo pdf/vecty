@@ -648,18 +648,7 @@ func (l keyedList) reconcile(parent *HTML, prevChild ComponentOrHTML) (pendingMo
 
 // remove keyedList elements from the parent.
 func (l keyedList) remove(parent *HTML) {
-	// Become the parent so that we can remove all of our children and get an
-	// updated insertBeforeNode value.
-	l.html.node = parent.node
-	l.html.insertBeforeNode = parent.insertBeforeNode
-	l.html.removeChildren(l.html.children)
-
-	// Now that the children are removed, and our insertBeforeNode value has
-	// been updated, update the parent's insertBeforeNode value since it is now
-	// invalid and ours is correct.
-	if parent.insertBeforeNode != nil {
-		parent.insertBeforeNode = l.html.insertBeforeNode
-	}
+	parent.removeChildren(l.html.children)
 }
 
 // Tag returns an HTML element with the given tag name. Generally, this

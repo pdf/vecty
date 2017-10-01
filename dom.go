@@ -351,7 +351,7 @@ func (h *HTML) reconcileChildren(prev *HTML) (pendingMounts []Mounter) {
 				pendingMounts = append(pendingMounts, m)
 			}
 			h.lastRenderedChild = nextChildRender
-			h.appendChild(nextChildRender)
+			h.insertBefore(h.insertBeforeNode, nextChildRender)
 			continue
 		}
 

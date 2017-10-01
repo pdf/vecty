@@ -593,7 +593,7 @@ func (h *HTML) insertBefore(node jsObject, child *HTML) {
 type List []ComponentOrHTML
 
 // WithKey wraps the List in a Keyer using the given key.
-func (l List) WithKey(key interface{}) MarkupOrChild {
+func (l List) WithKey(key interface{}) ComponentOrHTML {
 	return keyedList{key: key, html: &HTML{children: l}}
 }
 

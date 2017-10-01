@@ -623,6 +623,8 @@ func (l keyedList) reconcile(parent *HTML, prevChild ComponentOrHTML) (pendingMo
 	case keyedList:
 		pendingMounts = l.html.reconcileChildren(v.html)
 	case nil:
+		// No previous list, so reconcile against a parent with no children so
+		// all of our elements are added.
 		pendingMounts = l.html.reconcileChildren(&HTML{node: parent.node})
 	default:
 		// Build a previous render containing just the prevChild to be

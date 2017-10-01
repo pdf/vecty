@@ -287,7 +287,7 @@ func (h *HTML) reconcile(prev *HTML) []Mounter {
 func (h *HTML) reconcileChildren(prev *HTML) (pendingMounts []Mounter) {
 	hasKeyedChildren := len(h.keyedChildren) > 0
 	for i, nextChild := range h.children {
-		// Massage concrete type if necessary.
+		// Determine concrete type if necessary.
 		switch v := nextChild.(type) {
 		case *HTML:
 			// If the type of the child is *HTML, but its value is nil, replace

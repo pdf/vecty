@@ -125,8 +125,6 @@ type HTML struct {
 	key                             interface{}
 	// keyedChildren stores a map of keys to children, for keyed reconciliation.
 	keyedChildren map[interface{}]ComponentOrHTML
-	// hasKeyedChildren stores whether this element has keyed children.
-	hasKeyedChildren bool
 	// insertBeforeNode tracks the DOM node that elements should be inserted
 	// before, across List boundaries.
 	insertBeforeNode jsObject
@@ -287,6 +285,7 @@ func (h *HTML) reconcile(prev *HTML) []Mounter {
 // reconcileChildren reconciles children of the current HTML against a previous
 // render's DOM nodes.
 func (h *HTML) reconcileChildren(prev *HTML) (pendingMounts []Mounter) {
+	hasKeyedChildren := len(h.keyedChildren) > 0
 	for i, nextChild := range h.children {
 		// Massage concrete type if necessary.
 		switch v := nextChild.(type) {
@@ -311,12 +310,12 @@ func (h *HTML) reconcileChildren(prev *HTML) (pendingMounts []Mounter) {
 			nextKey interface{}
 		)
 		keyer, isKeyer := nextChild.(Keyer)
-		if h.hasKeyedChildren && !isKeyer {
+		if hasKeyedChildren && !isKeyer {
 			panic("vecty: all siblings must have keys when using keyed elements")
 		}
 		if isKeyer {
 			nextKey = keyer.Key()
-			if h.hasKeyedChildren && nextKey == nil {
+			if hasKeyedChildren && nextKey == nil {
 				panic("vecty: all siblings must have keys when using keyed elements")
 			}
 			if nextKey != nil {
@@ -328,14 +327,14 @@ func (h *HTML) reconcileChildren(prev *HTML) (pendingMounts []Mounter) {
 				}
 				// Store the keyed child.
 				h.keyedChildren[nextKey] = nextChild
+				hasKeyedChildren = true
 			}
 		}
-		h.hasKeyedChildren = len(h.keyedChildren) > 0
 
 		// If this is a new element (changed type, or did not exist previously),
 		// simply add the element directly. The existence of keyed children
 		// can not be determined by children index, so skip if keyed.
-		if (i >= len(prev.children) && !h.hasKeyedChildren) || new {
+		if (i >= len(prev.children) && !hasKeyedChildren) || new {
 			if nextChildList, ok := nextChild.(keyedList); ok {
 				nextChildList.reconcile(h, nil)
 				continue
@@ -359,7 +358,7 @@ func (h *HTML) reconcileChildren(prev *HTML) (pendingMounts []Mounter) {
 		}
 		// Find previous keyed sibling if exists, and mutate from there.
 		var stableKey bool
-		if h.hasKeyedChildren {
+		if hasKeyedChildren {
 			if prevKeyedChild, ok := prev.keyedChildren[nextKey]; ok {
 				// If the previous node rendered at this position matches the
 				// keyed previous render node, we have a stable key, and will
@@ -427,7 +426,7 @@ func (h *HTML) reconcileChildren(prev *HTML) (pendingMounts []Mounter) {
 		// If we're keyed and not stable, find the next DOM node from the
 		// previous render to insert before, for reordering.
 		var insertBeforeKeyedNode jsObject
-		if h.hasKeyedChildren && !stableKey {
+		if hasKeyedChildren && !stableKey {
 			insertBeforeKeyedNode = h.lastRenderedChild.nextSibling()
 			// If the next node is our old node, mark key as stable.
 			if prevChildRender != nil && prevChildRender.node == insertBeforeKeyedNode {
@@ -456,7 +455,7 @@ func (h *HTML) reconcileChildren(prev *HTML) (pendingMounts []Mounter) {
 			if nextChildComponent, ok := nextChild.(Component); ok && sameType(prevChildComponent, nextChildComponent) {
 				h.children[i] = prevChild
 				nextChild = prevChild
-				if h.hasKeyedChildren {
+				if hasKeyedChildren {
 					h.keyedChildren[nextKey] = prevChild
 				}
 			}
@@ -475,7 +474,7 @@ func (h *HTML) reconcileChildren(prev *HTML) (pendingMounts []Mounter) {
 			if m := mountUnmount(nextChild, prevChild); m != nil {
 				pendingMounts = append(pendingMounts, m)
 			}
-			if h.hasKeyedChildren && !stableKey {
+			if hasKeyedChildren && !stableKey {
 				// Moving keyed children need to be inserted (which moves existing
 				// nodes), rather than replacing the previous child at this
 				// position.
@@ -507,7 +506,7 @@ func (h *HTML) reconcileChildren(prev *HTML) (pendingMounts []Mounter) {
 
 	// If dealing with keyed siblings, remove children by key rather than
 	// position.
-	if prev.hasKeyedChildren && h.hasKeyedChildren {
+	if len(prev.keyedChildren) > 0 && hasKeyedChildren {
 		prevChildren := make([]ComponentOrHTML, len(prev.keyedChildren))
 		i := 0
 		for _, c := range prev.keyedChildren {
@@ -632,7 +631,6 @@ func (l keyedList) reconcile(parent *HTML, prevChild ComponentOrHTML) (pendingMo
 			prev := &HTML{node: parent.node, children: []ComponentOrHTML{prevChild}}
 			if keyer, ok := prevChild.(Keyer); ok && keyer.Key() != nil {
 				prev.keyedChildren = map[interface{}]ComponentOrHTML{keyer.Key(): prevChild}
-				prev.hasKeyedChildren = true
 			}
 			pendingMounts = l.html.reconcileChildren(prev)
 		}

@@ -622,18 +622,16 @@ func (l keyedList) reconcile(parent *HTML, prevChild ComponentOrHTML) (pendingMo
 	switch v := prevChild.(type) {
 	case keyedList:
 		pendingMounts = l.html.reconcileChildren(v.html)
+	case nil:
+		pendingMounts = l.html.reconcileChildren(&HTML{node: parent.node})
 	default:
-		if prevChild == nil {
-			pendingMounts = l.html.reconcileChildren(&HTML{node: parent.node})
-		} else {
-			// Build a previous render containing just the prevChild to be
-			// replaced by this list
-			prev := &HTML{node: parent.node, children: []ComponentOrHTML{prevChild}}
-			if keyer, ok := prevChild.(Keyer); ok && keyer.Key() != nil {
-				prev.keyedChildren = map[interface{}]ComponentOrHTML{keyer.Key(): prevChild}
-			}
-			pendingMounts = l.html.reconcileChildren(prev)
+		// Build a previous render containing just the prevChild to be
+		// replaced by this list
+		prev := &HTML{node: parent.node, children: []ComponentOrHTML{prevChild}}
+		if keyer, ok := prevChild.(Keyer); ok && keyer.Key() != nil {
+			prev.keyedChildren = map[interface{}]ComponentOrHTML{keyer.Key(): prevChild}
 		}
+		pendingMounts = l.html.reconcileChildren(prev)
 	}
 	// Update parent insertBeforeNode in case any children were removed.
 	if parent.insertBeforeNode != nil {

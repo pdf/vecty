@@ -286,6 +286,7 @@ func (h *HTML) reconcile(prev *HTML) []Mounter {
 // render's DOM nodes.
 func (h *HTML) reconcileChildren(prev *HTML) (pendingMounts []Mounter) {
 	hasKeyedChildren := len(h.keyedChildren) > 0
+	prevHadKeyedChildren := len(prev.keyedChildren) > 0
 	for i, nextChild := range h.children {
 		// Determine concrete type if necessary.
 		switch v := nextChild.(type) {
@@ -513,7 +514,7 @@ func (h *HTML) reconcileChildren(prev *HTML) (pendingMounts []Mounter) {
 
 	// If dealing with keyed siblings, remove all prev.keyedChildren which are
 	// leftovers / ones we did not find a match for above.
-	if len(prev.keyedChildren) > 0 && hasKeyedChildren {
+	if prevHadKeyedChildren && hasKeyedChildren {
 		// Convert prev.keyedChildren map to slice, and invoke removeChildren.
 		prevChildren := make([]ComponentOrHTML, len(prev.keyedChildren))
 		i := 0

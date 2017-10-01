@@ -615,10 +615,12 @@ func (l keyedList) Key() interface{} {
 // context, unless keyed. Uses the currently known insertion point from the
 // parent to insert children at the correct position.
 func (l keyedList) reconcile(parent *HTML, prevChild ComponentOrHTML) (pendingMounts []Mounter) {
-	// Copy parent scope to render list elements into
+	// Effectively become the parent (copy its scope) so that we can reconcile
+	// our children against the prev child.
 	l.html.node = parent.node
 	l.html.insertBeforeNode = parent.insertBeforeNode
 	l.html.lastRenderedChild = parent.lastRenderedChild
+
 	switch v := prevChild.(type) {
 	case keyedList:
 		pendingMounts = l.html.reconcileChildren(v.html)
@@ -635,11 +637,13 @@ func (l keyedList) reconcile(parent *HTML, prevChild ComponentOrHTML) (pendingMo
 		}
 		pendingMounts = l.html.reconcileChildren(prev)
 	}
-	// Update parent insertBeforeNode in case any children were removed.
+
+	// Update the parent insertBeforeNode and lastRenderedChild values to be
+	// ours, since we acted as the parent and ours is now updated / theirs is
+	// outdated.
 	if parent.insertBeforeNode != nil {
 		parent.insertBeforeNode = l.html.insertBeforeNode
 	}
-	// Update parent lastRenderedChild from list result.
 	if l.html.lastRenderedChild != nil {
 		parent.lastRenderedChild = l.html.lastRenderedChild
 	}

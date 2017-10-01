@@ -351,6 +351,10 @@ func (h *HTML) reconcileChildren(prev *HTML) (pendingMounts []Mounter) {
 				pendingMounts = append(pendingMounts, m)
 			}
 			h.lastRenderedChild = nextChildRender
+
+			// Note: we must insertBefore not appendChild because if we're
+			// rendering inside a list with unkeyed children, we will have an
+			// insertion node here.
 			h.insertBefore(h.insertBeforeNode, nextChildRender)
 			continue
 		}

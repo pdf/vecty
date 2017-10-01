@@ -523,7 +523,9 @@ func (h *HTML) reconcileChildren(prev *HTML) (pendingMounts []Mounter) {
 		}
 		h.removeChildren(prevChildren)
 		return pendingMounts
-	} else if len(prev.children) > len(h.children) {
+	}
+
+	if len(prev.children) > len(h.children) {
 		// Remove every previous child that h.children does not have in common.
 		h.removeChildren(prev.children[len(h.children):])
 	}

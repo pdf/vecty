@@ -504,9 +504,10 @@ func (h *HTML) reconcileChildren(prev *HTML) (pendingMounts []Mounter) {
 		}
 	}
 
-	// If dealing with keyed siblings, remove children by key rather than
-	// position.
+	// If dealing with keyed siblings, remove all prev.keyedChildren which are
+	// leftovers / ones we did not find a match for above.
 	if len(prev.keyedChildren) > 0 && hasKeyedChildren {
+		// Convert prev.keyedChildren map to slice, and invoke removeChildren.
 		prevChildren := make([]ComponentOrHTML, len(prev.keyedChildren))
 		i := 0
 		for _, c := range prev.keyedChildren {

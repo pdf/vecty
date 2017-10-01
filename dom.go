@@ -71,7 +71,7 @@ type Unmounter interface {
 
 // Keyer is an optional interface that a Component can implement in order to
 // uniquely identify the component amongst its siblings. If implemented, all
-// sibling, both components and HTML, must also be keyed.
+// siblings, both components and HTML, must also be keyed.
 //
 // Implementing this interface allows siblings to be removed or re-ordered
 // whilst retaining state, and improving render efficiency.
